@@ -165,7 +165,7 @@ Priority is **1 = highest** (tried first).
 | `FLASHINFER` | trtllm-gen† | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2`, `nvfp4` | 16, 32, 64, 128, 256, 512, 1024 | 64, 128, 256, 512 | ✅ | ✅ | ❌ | ✅ | Decoder | 10.x |
 | `FLASH_ATTN` | FA2* | fp16, bf16 | `auto`, `float16`, `bfloat16` | %16 | Any | ❌ | ✅ | ❌ | ✅ | All | ≥8.0 |
 | `FLASH_ATTN` | FA3* | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3` | %16 | Any | ✅ | ✅ | ❌ | ✅ | All | 9.x |
-| `FLASH_ATTN` | FA4* | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3` | %16 | Any | ✅ | ✅ | ❌ | ✅ | All | ≥10.0 |
+| `FLASH_ATTN` | FA4* | fp16, bf16 | `auto`, `float16`, `bfloat16` (`fp8`, `fp8_e4m3` on SM100+) | %16 | Any | ✅ | ✅ | ❌ | ✅ | All | 9.x-10.x |
 | `FLASH_ATTN_DIFFKV` | | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | ✅ | Decoder | Any |
 | `FLEX_ATTENTION` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16` | %16 | Any | ❌ | ✅ | ✅ | ❌ | Decoder, Encoder Only | Any |
 | `HPC_ATTN` | | fp16, bf16 | `auto`, `bfloat16`, `fp8_e4m3` | 64 | 128 | ❌ | ❌ | ❌ | ❌ | Decoder | ≥9.0 |
@@ -178,7 +178,7 @@ Priority is **1 = highest** (tried first).
 
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
-> **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
+> **\*** By default, compatible requests prefer FA4 on SM90 (Hopper) and SM100 (Blackwell); request-specific compatibility rules may fall back to FA3 or FA2.
 
 ## MiniMax M3 Sparse Attention Backends
 

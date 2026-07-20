@@ -144,20 +144,91 @@ class TestGetMLAPrefillBackend:
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn.current_platform"
+            ) as mock_fa_platform,
             patch.object(flash_attn_cls, "is_available", return_value=True),
             patch(
                 "vllm.v1.attention.backends.mla.prefill.flash_attn."
                 "get_flash_attn_version",
-                return_value=3,
+                return_value=4,
+            ),
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn."
+                "is_fa_version_supported",
+                return_value=True,
+            ),
+        ):
+            capability = DeviceCapability(major=9, minor=0)
+            mock_platform.get_device_capability.return_value = capability
+            mock_platform.is_rocm.return_value = False
+            mock_fa_platform.get_device_capability.return_value = capability
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend.get_name() == "FLASH_ATTN"
+
+    @pytest.mark.parametrize(
+        ("mla_dimensions", "expect_keys"),
+        [
+            (
+                MLADimensions(
+                    qk_nope_head_dim=192,
+                    qk_rope_head_dim=64,
+                    v_head_dim=256,
+                ),
+                False,
+            ),
+            (
+                MLADimensions(
+                    qk_nope_head_dim=128,
+                    qk_rope_head_dim=64,
+                    v_head_dim=128,
+                ),
+                True,
+            ),
+        ],
+        ids=["glm-fa3", "deepseek-fa4"],
+    )
+    def test_fa4_warmup_matches_hopper_mla_version(
+        self, mla_dimensions: MLADimensions, expect_keys: bool
+    ):
+        from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+            FA4_MLA_PREFILL_KERNEL,
+        )
+
+        vllm_config = _make_vllm_config()
+        vllm_config.model_config.get_num_attention_heads.return_value = 8
+
+        with (
+            patch(
+                "vllm.model_executor.layers.attention.mla_attention.get_mla_dims",
+                return_value=mla_dimensions,
+            ),
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn.current_platform"
+            ) as mock_platform,
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn."
+                "get_flash_attn_version",
+                return_value=4,
+            ),
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn."
+                "is_fa_version_supported",
+                return_value=True,
             ),
         ):
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
-            mock_platform.is_rocm.return_value = False
+            mock_platform.is_device_capability.side_effect = lambda capability: (
+                capability == 90
+            )
+            mock_platform.is_device_capability_family.return_value = False
 
-            backend = get_mla_prefill_backend(vllm_config)
-            assert backend.get_name() == "FLASH_ATTN"
+            keys = FA4_MLA_PREFILL_KERNEL.get_warmup_keys(vllm_config)
+
+        assert bool(keys) is expect_keys
 
 
 class TestAutoSelectMLAPrefillBackend:
@@ -183,6 +254,9 @@ class TestAutoSelectMLAPrefillBackend:
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
+            patch(
+                "vllm.v1.attention.backends.mla.prefill.flash_attn.current_platform"
+            ) as mock_fa_platform,
             patch.object(flash_attn_cls, "is_available", return_value=True),
             patch(
                 "vllm.v1.attention.backends.mla.prefill.flash_attn."
@@ -193,6 +267,7 @@ class TestAutoSelectMLAPrefillBackend:
         ):
             # Force the non-ROCm priority on the Blackwell.
             mock_platform.is_rocm.return_value = False
+            mock_fa_platform.get_device_capability.return_value = capability
             backend = _auto_select_mla_prefill_backend(
                 capability,
                 selector_config,

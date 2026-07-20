@@ -129,11 +129,71 @@ class FlashAttentionCuTeDSLCompileSpec:
         )
 
 
+def _fa3_supports_fp16_bf16_head_dims(
+    head_size: int | None,
+    head_size_v: int | None,
+) -> bool:
+    if head_size is None:
+        return False
+    if head_size_v is None:
+        head_size_v = head_size
+    if (
+        head_size <= 0
+        or head_size > 256
+        or head_size % 8 != 0
+        or head_size_v <= 0
+        or head_size_v % 8 != 0
+    ):
+        return False
+    if head_size == head_size_v:
+        return True
+    return (head_size <= 64 and head_size_v <= 512) or (
+        128 < head_size <= 192 and 96 < head_size_v <= 128
+    )
+
+
+def _fa3_supports_fp8_head_dims(
+    head_size: int | None,
+    head_size_v: int | None,
+) -> bool:
+    if head_size is None:
+        return head_size_v is None
+    if head_size_v is None:
+        head_size_v = head_size
+    if (
+        head_size <= 0
+        or head_size % 16 != 0
+        or head_size_v <= 0
+        or head_size_v % 16 != 0
+    ):
+        return False
+    return (head_size == head_size_v and head_size <= 256) or (
+        128 < head_size <= 192 and 96 < head_size_v <= 128
+    )
+
+
+def _fa3_supports_head_dims(
+    head_size: int | None,
+    head_size_v: int | None,
+    kv_cache_dtype: str | None,
+) -> bool:
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        return _fa3_supports_fp8_head_dims(head_size, head_size_v)
+    if kv_cache_dtype in (None, "auto", "float16", "bfloat16"):
+        return (head_size is None and head_size_v is None) or (
+            _fa3_supports_fp16_bf16_head_dims(head_size, head_size_v)
+        )
+    return False
+
+
 def get_flash_attn_version(
     requires_alibi: bool = False,
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    *,
+    kv_cache_dtype: str | None = None,
+    is_paged: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -151,9 +211,14 @@ def get_flash_attn_version(
         assert device_capability is not None
 
         # 1. default version depending on platform
-        if device_capability.major == 9 and is_fa_version_supported(3):
-            # Hopper (SM90): prefer FA3
-            fa_version = 3
+        if device_capability.major == 9:
+            # Hopper (SM90): prefer FA4, then FA3
+            if is_fa_version_supported(4):
+                fa_version = 4
+            elif is_fa_version_supported(3):
+                fa_version = 3
+            else:
+                fa_version = 2
         elif device_capability.major == 10 and is_fa_version_supported(4):
             # Blackwell (SM100+, restrict to SM100 for now): prefer FA4
             fa_version = 4
@@ -191,6 +256,33 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        if (
+            fa_version == 4
+            and device_capability.major == 9
+            and is_fa_version_supported(3)
+        ):
+            fallback_reason = None
+            if kv_cache_dtype in ("fp8", "fp8_e4m3") and _fa3_supports_head_dims(
+                head_size, head_size_v, kv_cache_dtype
+            ):
+                fallback_reason = f"KV cache dtype {kv_cache_dtype}"
+            elif (
+                kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+                and is_paged
+                and (
+                    (head_size is not None and head_size % 16 != 0)
+                    or (head_size_v is not None and head_size_v % 16 != 0)
+                )
+                and _fa3_supports_head_dims(head_size, head_size_v, kv_cache_dtype)
+            ):
+                fallback_reason = "paged KV with an irregular head dimension"
+            if fallback_reason:
+                logger.warning_once(
+                    "FA4 does not support %s on SM90, defaulting to FA version 3.",
+                    fallback_reason,
+                )
+                fa_version = 3
+
         # Some FA3 unsupported SM90 cases can use FA4 when available.
         if (
             fa_version == 3
@@ -222,13 +314,30 @@ def get_flash_attn_version(
                 fa_version = 4
 
         # FA4 currently uses batch-shape-dependent scheduling
-        # heuristics on SM100+, which breaks batch invariance.
+        # heuristics, which breaks batch invariance.
         if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
+            fa3_supports_request = (
+                device_capability.major == 9
+                and is_fa_version_supported(3)
+                and _fa3_supports_head_dims(head_size, head_size_v, kv_cache_dtype)
+                and not (
+                    has_sinks
+                    and head_size is not None
+                    and head_size_v is not None
+                    and head_size != head_size_v
+                )
+                and not (
+                    vllm_config is not None
+                    and vllm_config.model_config is not None
+                    and vllm_config.model_config.is_diffusion
+                )
+            )
+            fa_version = 3 if fa3_supports_request else 2
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
-                "defaulting to FA version 2.",
+                "defaulting to FA version %d.",
+                fa_version,
             )
-            fa_version = 2
 
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
         # supported head dimensions.
@@ -290,6 +399,7 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        kv_cache_dtype=kv_cache_dtype,
     )
     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)

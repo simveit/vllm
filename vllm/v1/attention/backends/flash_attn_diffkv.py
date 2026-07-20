@@ -60,6 +60,7 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
                 head_size=head_size,
                 head_size_v=head_size_v,
                 has_sinks=has_sinks,
+                is_paged=True,
             )
         except Exception:
             return False
@@ -130,6 +131,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             head_size=self.head_size,
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
+            kv_cache_dtype=self.kv_cache_dtype,
+            is_paged=self.attn_type
+            not in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER),
         )
 
     def do_kv_cache_update(
@@ -226,7 +230,9 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             )
 
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(
+            [self.head_size, FlashAttentionDiffKVBackend.head_size_v], dim=-1
+        )
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.

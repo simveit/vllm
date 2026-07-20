@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     compile_flash_attn_varlen_func_from_specs,
     get_flash_attn_version,
+    is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.mla.prefill.base import (
@@ -154,7 +155,13 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 
         mla_dims = get_mla_dims(vllm_config.model_config)
         qk_head_dim = mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
-        fa_version = get_flash_attn_version(head_size=qk_head_dim)
+        fa_version = _get_mla_flash_attn_version(
+            MLADimensions(
+                qk_nope_head_dim=mla_dims.qk_nope_head_dim,
+                qk_rope_head_dim=mla_dims.qk_rope_head_dim,
+                v_head_dim=mla_dims.v_head_dim,
+            )
+        )
         if fa_version != 4:
             return []
 
@@ -275,6 +282,25 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
 FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
 
 
+def _get_mla_flash_attn_version(mla_dimensions: MLADimensions) -> int | None:
+    fa_version = get_flash_attn_version()
+    device_capability = current_platform.get_device_capability()
+    if (
+        fa_version == 4
+        and mla_dimensions
+        == MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
+        )
+        and device_capability is not None
+        and device_capability[0] == 9
+        and is_fa_version_supported(3)
+    ):
+        return 3
+    return fa_version
+
+
 class FlashAttnPrefillBackend(MLAPrefillBackend):
     """FlashAttention backend for MLA prefill."""
 
@@ -303,7 +329,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             qk_rope_head_dim=64,
             v_head_dim=128,
         )
-        fa_version = get_flash_attn_version()
+        fa_version = _get_mla_flash_attn_version(mla_dimensions)
         if fa_version == 4:
             return mla_dimensions in [dims_deepseek, dims_mistral_s4]
         else:
@@ -335,10 +361,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             "FlashAttnPrefillBackend requires flash_attn_varlen_func. "
             "Ensure FlashAttnPrefillBackend.is_available() is checked first."
         )
-        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        self.vllm_flash_attn_version = get_flash_attn_version(
-            head_size=qk_head_dim, head_size_v=v_head_dim
+        self.vllm_flash_attn_version = _get_mla_flash_attn_version(
+            MLADimensions(
+                qk_nope_head_dim=qk_nope_head_dim,
+                qk_rope_head_dim=qk_rope_head_dim,
+                v_head_dim=v_head_dim,
+            )
         )
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = functools.partial(

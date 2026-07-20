@@ -46,6 +46,7 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
@@ -58,7 +59,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -349,12 +350,24 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    _cudagraph_support = (
-        AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
-        else AttentionCGSupport.UNIFORM_BATCH
-    )
     supports_update_block_table: bool = True
+
+    @staticmethod
+    def _get_fa_version(
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
+    ) -> int | None:
+        with set_current_vllm_config(vllm_config):
+            return get_flash_attn_version(
+                head_size=kv_cache_spec.head_size,
+                head_size_v=getattr(kv_cache_spec, "head_size_v", None),
+                kv_cache_dtype=(
+                    "fp8"
+                    if kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                    else "auto"
+                ),
+                is_paged=True,
+            )
 
     @classmethod
     def get_cudagraph_support(
@@ -362,7 +375,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
-        return cls._cudagraph_support
+        return (
+            AttentionCGSupport.ALWAYS
+            if cls._get_fa_version(vllm_config, kv_cache_spec) == 3
+            else AttentionCGSupport.UNIFORM_BATCH
+        )
 
     def __init__(
         self,
@@ -387,7 +404,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = get_flash_attn_version() == 3
+        self.aot_schedule = self._get_fa_version(vllm_config, kv_cache_spec) == 3
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -784,6 +801,9 @@ class FlashAttentionImpl(AttentionImpl):
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
             has_sinks=sinks is not None,
+            kv_cache_dtype=kv_cache_dtype,
+            is_paged=attn_type
+            not in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER),
         )
         logger.info_once(
             "Using FlashAttention version %s",
