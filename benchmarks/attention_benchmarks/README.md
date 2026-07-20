@@ -85,6 +85,13 @@ Tests standard attention backends (Flash/Triton/FlashInfer) with pure prefill, d
 python benchmark.py --config configs/standard_attention.yaml
 ```
 
+On Hopper, compare FA3 and FA4 by overriding the backends:
+
+```bash
+python benchmark.py --config configs/standard_attention.yaml \
+    --backends FLASH_ATTN_FA3 FLASH_ATTN_FA4
+```
+
 ### Reorder Threshold Study
 
 **Question:** At what query length does the prefill pipeline become faster than the decode pipeline?
